@@ -2,10 +2,10 @@
 set -e
 
 # Default directory expected by the app to locate video and model assets
-DEMO_ROOT="../yolo26_demo"
+DEMO_ROOT="$(pwd)"
 
 # Check if a custom config string is provided, else use the default one
-CONFIG_PATH=${1:-"demo/config/yolo26_multich.yaml"}
+CONFIG_PATH=${1:-"config/default.yaml"}
 
 # Absolute paths
 EXE_PATH="$(pwd)/build/yolo26_demo_cpp"
@@ -16,7 +16,7 @@ if [ ! -f "$EXE_PATH" ]; then
 fi
 
 if [ ! -d "$DEMO_ROOT" ]; then
-    echo "Error: Base directory $DEMO_ROOT not found. Ensure python demo is cloned alongside this cpp folder."
+    echo "Error: Base directory $DEMO_ROOT not found."
     exit 1
 fi
 

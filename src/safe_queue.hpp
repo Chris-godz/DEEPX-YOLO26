@@ -23,6 +23,16 @@ public:
         condition_.notify_one();
     }
 
+    bool try_push(T item, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!condition_.wait_for(lock, timeout, [this] { return queue_.size() < max_size_; })) {
+            return false;
+        }
+        queue_.push(std::move(item));
+        condition_.notify_one();
+        return true;
+    }
+
     T pop() {
         std::unique_lock<std::mutex> lock(mutex_);
         condition_.wait(lock, [this] { return !queue_.empty(); });

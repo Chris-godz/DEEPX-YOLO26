@@ -7,7 +7,7 @@
 int main(int argc, char* argv[]) {
     QApplication a(argc, argv);
 
-    std::string config_path = "../demo/config/yolo26_multich.yaml";
+    std::string config_path = "config/default.yaml";
     if (argc > 1) {
         config_path = argv[1];
     }

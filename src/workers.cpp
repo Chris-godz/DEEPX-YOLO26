@@ -13,16 +13,6 @@ extern const std::vector<std::string> COCO_CLASS_NAMES = {
     "hair drier", "toothbrush"
 };
 
-struct AsyncRequestMeta {
-    int request_id;
-    FrameMeta frame_meta;
-};
-
-// Global mapping for request_id to Meta bridging WaitQueue gaps
-std::unordered_map<int, FrameMeta> requestIdToMeta;
-std::mutex requestMapMutex;
-
-
 void Workers::set_active_classes(const std::vector<bool>& active) {
     std::lock_guard<std::mutex> lock(active_mutex_);
     active_classes_ = active;
@@ -72,21 +62,42 @@ bool Workers::get_latest_frame(int channel_id, cv::Mat& out_frame) {
 
 void Workers::capture_thread(int channel_id, const ChannelConfig& config) {
     cv::VideoCapture cap;
-    if (config.type == "camera") {
-        cap.open(config.source_int);
-    } else {
-        cap.open(config.source_str);
-    }
-    if (!cap.isOpened()) {
-        std::cerr << "Failed to open video source: " << config.name << std::endl;
-        return;
-    }
+    auto open_source = [&]() -> bool {
+        if (config.type == "camera") {
+            return cap.open(config.source_int);
+        }
+        return cap.open(config.source_str);
+    };
+
+    bool logged_open_fail = false;
+    int reopen_backoff_ms = 500;
     int frame_index = 0;
     while (running_) {
+        if (!cap.isOpened()) {
+            if (!open_source()) {
+                if (!logged_open_fail) {
+                    std::cerr << "Failed to open video source: " << config.name << ", retrying..." << std::endl;
+                    logged_open_fail = true;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(reopen_backoff_ms));
+                continue;
+            }
+            logged_open_fail = false;
+        }
+
         cv::Mat frame;
         cap >> frame;
         if (frame.empty()) {
-            cap.set(cv::CAP_PROP_POS_FRAMES, 0); // loop
+            if (config.type == "video") {
+                cap.set(cv::CAP_PROP_POS_FRAMES, 0);
+                cap >> frame;
+                if (frame.empty()) {
+                    cap.release();
+                }
+            } else {
+                cap.release();
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
             continue;
         }
         
@@ -94,11 +105,11 @@ void Workers::capture_thread(int channel_id, const ChannelConfig& config) {
         meta.channel_id = channel_id;
         meta.frame_index = frame_index++;
         meta.original_frame = frame.clone();
+
+        pre_queue_.try_push(std::move(meta), std::chrono::milliseconds(1));
         
-        pre_queue_.push(meta);
-        
-        // rudimentary framerate control so we don't blow up ram
-        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        int fps = (config.max_fps > 0) ? config.max_fps : 25;
+        std::this_thread::sleep_for(std::chrono::milliseconds(std::max(1, 1000 / fps)));
     }
 }
 
@@ -113,12 +124,11 @@ void Workers::preprocess_thread() {
         engine_->preprocess(meta.original_frame, input_tensor, meta);
         
         int request_id = engine_->get_ie()->RunAsync(input_tensor.data(), nullptr, nullptr);
-        
-        {
-            std::lock_guard<std::mutex> lock(requestMapMutex);
-            requestIdToMeta[request_id] = meta;
-        }
-        Wait_queue_.push(request_id);
+
+        WaitTask task;
+        task.request_id = request_id;
+        task.meta = std::move(meta);
+        Wait_queue_.push(std::move(task));
     }
 }
 
@@ -127,24 +137,17 @@ void Workers::Wait_thread() {
     auto ypp = engine_->get_ypp();
     
     while (running_) {
-        int request_id;
-        if (!Wait_queue_.try_pop(request_id, std::chrono::milliseconds(100))) {
+        WaitTask wait_task;
+        if (!Wait_queue_.try_pop(wait_task, std::chrono::milliseconds(100))) {
             continue;
         }
         
-        auto outputs = ie->Wait(request_id);
-        
-        FrameMeta meta;
-        {
-            std::lock_guard<std::mutex> lock(requestMapMutex);
-            meta = requestIdToMeta[request_id];
-            requestIdToMeta.erase(request_id);
-        }
+        auto outputs = ie->Wait(wait_task.request_id);
         
         std::vector<YOLOv26Result> detections = ypp->postprocess(outputs);
         
         DrawTask task;
-        task.meta = meta;
+        task.meta = std::move(wait_task.meta);
         task.detections = detections;
         
         draw_queue_.push(task);

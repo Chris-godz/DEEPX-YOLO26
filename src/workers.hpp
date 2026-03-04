@@ -14,6 +14,11 @@ struct DrawTask {
     std::vector<YOLOv26Result> detections;
 };
 
+struct WaitTask {
+    int request_id;
+    FrameMeta meta;
+};
+
 class Workers {
 public:
     void set_active_classes(const std::vector<bool>& active);
@@ -41,7 +46,7 @@ private:
 
     // Queues
     SafeQueue<FrameMeta> pre_queue_;
-    SafeQueue<int> Wait_queue_; // Using request_id or directly storing vectors
+    SafeQueue<WaitTask> Wait_queue_;
     SafeQueue<DrawTask> draw_queue_;
 
     // Thread management
